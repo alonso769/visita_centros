@@ -15,66 +15,68 @@ const CREDENCIALES = {
 const delay = (time) => new Promise(resolve => setTimeout(resolve, time));
 
 app.post('/api/buscar-dni', async (req, res) => {
-    // 3 minutos de tiempo máximo
-    req.setTimeout(180000); 
+    // Aumentamos el tiempo máximo de la petición a 5 minutos (Render es lento a veces)
+    req.setTimeout(300000); 
     
     const { dni } = req.body;
-    console.log(`🤖 ROBOT V21: Solicitud para DNI ${dni}...`);
+    console.log(`🤖 ROBOT V22 (RENDER): Solicitud para DNI ${dni}...`);
 
     let browser = null;
 
     try {
         browser = await puppeteer.launch({ 
-            // 'new' oculta la ventana.
             headless: 'new', 
-            
-            // IMPORTANTE: Ignorar errores de certificados (común en MINSA)
             ignoreHTTPSErrors: true,
-            
             defaultViewport: null,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
+                '--disable-dev-shm-usage', // Vital para Render (memoria compartida)
+                '--disable-accelerated-2d-canvas', // Ahorra recursos gráficos
+                '--disable-gpu', // Render no tiene GPU
                 '--start-maximized',
-                // Estos flags ayudan a que no detecten que es un robot
-                '--disable-blink-features=AutomationControlled'
+                '--single-process' // Ayuda en entornos ligeros
             ]
         });
         
         const pages = await browser.pages();
         const page = pages[0];
 
-        // --- DISFRAZ DE HUMANO (CLAVE PARA QUE NO TE BLOQUEEN) ---
+        // Configuración de tiempos de espera más largos (60 segundos por defecto)
+        page.setDefaultNavigationTimeout(60000);
+        page.setDefaultTimeout(60000);
+
+        // DISFRAZ DE HUMANO
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setViewport({ width: 1920, height: 1080 });
 
         // 1. LOGIN
         console.log(`[${dni}] Paso 1: Navegando al Login...`);
         
-        // Usamos waitUntil: 'networkidle2' para esperar a que cargue todo bien
+        // Usamos 'domcontentloaded' que es más rápido y falla menos que 'networkidle2'
         await page.goto('https://internoscs.minsa.gob.pe/Seguridad/Login', { 
-            waitUntil: 'networkidle2', 
-            timeout: 60000 
+            waitUntil: 'domcontentloaded'
         });
 
-        // Popup Fechas (Intento rápido)
+        // Esperamos explícitamente a que el input exista (hasta 60 seg)
+        console.log(`[${dni}] Esperando carga del formulario...`);
+        
+        // Intentamos cerrar popup si aparece rápido
         try {
-            await page.waitForSelector('button', { timeout: 2000 }); // Esperar un poco a que aparezca algo
-            await page.evaluate(() => {
-                const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('CERRAR'));
-                if (btn) btn.click();
-            });
-        } catch (e) { /* Si no hay popup, seguimos */ }
-        
-        await page.keyboard.press('Escape'); 
+            const btnCerrar = await page.waitForSelector('button.btn-danger', { timeout: 5000 });
+            if (btnCerrar) {
+                await page.evaluate(b => b.click(), btnCerrar);
+                console.log("Popup inicial cerrado.");
+            }
+        } catch (e) {}
 
-        // Credenciales (Aumentamos el timeout por si el internet está lento)
-        console.log(`[${dni}] Escribiendo credenciales...`);
-        await page.waitForSelector('input[placeholder="Usuario"]', { timeout: 30000 });
+        // BUSCAMOS EL INPUT DE USUARIO
+        await page.waitForSelector('input[placeholder="Usuario"]', { visible: true });
         
-        await page.type('input[placeholder="Usuario"]', CREDENCIALES.user, { delay: 50 }); 
-        await page.type('input[type="password"]', CREDENCIALES.pass, { delay: 50 });
+        console.log(`[${dni}] Escribiendo credenciales...`);
+        await delay(1000); // Pequeña pausa de seguridad
+        await page.type('input[placeholder="Usuario"]', CREDENCIALES.user); 
+        await page.type('input[type="password"]', CREDENCIALES.pass);
         await delay(500); 
 
         // Click Login
@@ -84,47 +86,52 @@ app.post('/api/buscar-dni', async (req, res) => {
         });
         
         console.log(`[${dni}] Entrando al sistema...`);
-        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForNavigation({ waitUntil: 'domcontentloaded' });
 
         // Limpiar Bienvenida
-        await delay(1000);
-        await page.evaluate(() => {
-            const btn = Array.from(document.querySelectorAll('button.btn-danger')).find(b => b.innerText.includes('CERRAR'));
-            if (btn) btn.click();
-        });
+        await delay(1500);
+        try {
+            await page.evaluate(() => {
+                const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('CERRAR'));
+                if (btn) btn.click();
+            });
+        } catch(e) {}
 
         // 2. NAVEGAR MENU
         console.log(`[${dni}] Paso 2: Buscando opción de menú...`);
         
-        // Estrategia robusta para encontrar el menú
+        // Navegación directa forzada (Más fiable que hacer clic)
+        const urlActual = page.url();
+        // Si estamos en la home, intentamos ir directo a la URL del proceso si la sabemos,
+        // si no, usamos el método de clics pero con más espera.
+        
         const menuClick = await page.evaluate(() => {
-            // Buscar texto "PROCESO"
             const links = Array.from(document.querySelectorAll('a'));
             const proceso = links.find(x => x.innerText.toUpperCase().includes('PROCESO'));
             if (proceso) { proceso.click(); return true; }
             return false;
         });
 
-        if(menuClick) await delay(800);
+        if(menuClick) await delay(1000);
 
         try {
-            // Intentar clic directo al submenú
-            await page.waitForSelector('#lnkAsociarInternoAmbito', { timeout: 5000 });
+            await page.waitForSelector('#lnkAsociarInternoAmbito', { timeout: 10000 });
             await page.click('#lnkAsociarInternoAmbito');
         } catch (e) {
-            // Fallback: Forzar clic por JS
+            // Fallback JS puro
             await page.evaluate(() => {
                 const link = document.getElementById('lnkAsociarInternoAmbito');
                 if(link) link.click();
             });
         }
         
-        // 3. ESPERAR TABLA (Punto crítico)
-        console.log(`[${dni}] ⏳ Esperando carga de datos...`);
-        await page.waitForSelector('#divGrillaListadoProcesosInternados', { visible: true, timeout: 60000 });
+        // 3. ESPERAR TABLA
+        console.log(`[${dni}] ⏳ Esperando carga de tabla (puede tardar)...`);
+        await page.waitForSelector('#divGrillaListadoProcesosInternados', { visible: true });
 
-        // Seleccionar primera convocatoria si no hay lupa
-        await delay(1000); 
+        await delay(1500);
+        
+        // Seleccionar primera convocatoria
         const hayLupa = await page.evaluate(() => {
             const img = document.querySelector('#divGrillaListadoProcesosInternados img[title*="Visualizar"]');
             if (img) { img.click(); return true; }
@@ -138,11 +145,11 @@ app.post('/api/buscar-dni', async (req, res) => {
         // 4. BÚSQUEDA DEL DNI
         console.log(`[${dni}] 🔍 Buscando postulante...`);
         const idDni = '#txtNumeroDocumentoPostulanteRegistrado';
-        await page.waitForSelector(idDni, { visible: true, timeout: 30000 });
+        await page.waitForSelector(idDni, { visible: true });
 
         // Limpiar y escribir
         await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, idDni);
-        await page.type(idDni, dni, { delay: 50 });
+        await page.type(idDni, dni, { delay: 100 }); // Escribir más lento para que la web lo procese
         await page.keyboard.press('Tab');
         await delay(500);
 
@@ -153,7 +160,7 @@ app.post('/api/buscar-dni', async (req, res) => {
         });
 
         // 5. SELECCIONAR RESULTADO
-        await delay(2000); // Esperar refresco de tabla
+        await delay(3000); // Espera más larga para resultados en servidor lento
 
         const resultadoClick = await page.evaluate((dniBuscado) => {
             const filas = Array.from(document.querySelectorAll('#divGrillaListadoProcesosInternados table tbody tr'));
@@ -163,12 +170,10 @@ app.post('/api/buscar-dni', async (req, res) => {
                 const lupa = fila.querySelector('img[src*="visualizar.png"]');
                 if (lupa) {
                     lupa.click();
-                    // Refuerzo clic al padre
                     if(lupa.parentElement && lupa.parentElement.tagName === 'A') lupa.parentElement.click();
                     return "OK";
                 }
             }
-            // Intento desesperado: si solo hay 1 fila en la tabla (la del resultado)
             const todasLupas = document.querySelectorAll('img[src*="visualizar.png"]');
             if(todasLupas.length === 1) {
                 todasLupas[0].click();
@@ -184,7 +189,7 @@ app.post('/api/buscar-dni', async (req, res) => {
 
         // 6. EXTRACCIÓN
         console.log(`[${dni}] 📥 Extrayendo datos...`);
-        await page.waitForSelector('#txtNombre', { visible: true, timeout: 20000 });
+        await page.waitForSelector('#txtNombre', { visible: true, timeout: 30000 });
         await delay(500); 
 
         const datos = await page.evaluate(() => {
@@ -217,16 +222,16 @@ app.post('/api/buscar-dni', async (req, res) => {
         res.json({ success: true, found: true, data: resultadoFinal });
 
     } catch (error) {
-        console.error(`[${dni}] ❌ ERROR:`, error.message);
+        console.error(`[${dni}] ❌ ERROR CRÍTICO:`, error.message);
         if (!res.headersSent) res.status(500).json({ success: false, error: error.message });
     } finally {
         if (browser) {
-            console.log(`[${dni}] 🧹 Limpiando...`);
-            await browser.close().catch(()=>console.log("Browser ya cerrado"));
+            console.log(`[${dni}] 🧹 Limpiando navegador...`);
+            await browser.close().catch(e => console.error("Error cerrando:", e));
         }
     }
 });
 
 app.listen(3001, () => {
-    console.log('🤖 ROBOT V21 (ANTI-BLOQUEO) listo en puerto 3001');
+    console.log('🤖 ROBOT V22 (RENDER OPTIMIZADO) listo en puerto 3001');
 });
