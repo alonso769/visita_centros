@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth } from '../firebase';
-import { collection, addDoc, query, where, getDocs, updateDoc, doc, Timestamp } from 'firebase/firestore';
+import { collection, addDoc, query, where, getDocs, updateDoc, doc, Timestamp, getDoc } from 'firebase/firestore'; // Agregamos getDoc
 import { healthCenters, universities, careers } from '../data';
 import { Clock, MapPin, LogOut, Save, Search, Plus, Trash2, Users, CheckCircle, Loader, ExternalLink } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -29,7 +29,19 @@ export default function Dashboard({ user, isAdmin }) {
     const [timeLeft, setTimeLeft] = useState(null);
     const [location, setLocation] = useState(null);
     const [internsList, setInternsList] = useState([]);
-    const [currentIntern, setCurrentIntern] = useState({ dni: '', name: '', university: '', career: '' });
+    
+    // Estado del interno actual con los campos de tu Excel
+    const [currentIntern, setCurrentIntern] = useState({ 
+        dni: '', 
+        name: '', 
+        university: '', 
+        career: '',
+        // Campos nuevos para mostrar en la lista
+        sedeDocente: '',
+        fechaInicio: '',
+        fechaFin: ''
+    });
+
     const [visitData, setVisitData] = useState({
         tutorName: '', tutorSpec: '', internCount: '', observations: '', 
         locationCorrect: 'yes', formGoogleDone: false
@@ -64,7 +76,6 @@ export default function Dashboard({ user, isAdmin }) {
                 if (!snap.empty) {
                     const data = snap.docs[0].data();
                     setSession({ id: snap.docs[0].id, ...data });
-                    // Si ya hay sesión activa, recuperamos el centro seleccionado de la sesión
                     if (data.centerData) setSelectedCenter(data.centerData);
                 }
             } catch (error) {
@@ -92,43 +103,60 @@ export default function Dashboard({ user, isAdmin }) {
         return () => clearInterval(interval);
     }, [session]);
 
+    // ------------------------------------------------------------------
+    //  NUEVA BÚSQUEDA: DIRECTO EN FIREBASE (SIN ROBOT)
+    // ------------------------------------------------------------------
     const searchDNI = async () => {
-        if (currentIntern.dni.length !== 8) return alert("DNI debe tener 8 dígitos");
-        setCurrentIntern(prev => ({ ...prev, name: "⏳ Buscando..." }));
+        const dniBuscado = currentIntern.dni.trim();
+        
+        if (dniBuscado.length !== 8) return alert("El DNI debe tener 8 dígitos.");
+        
+        setCurrentIntern(prev => ({ ...prev, name: "🔍 Buscando en base de datos..." }));
+
         try {
-            const response = await fetch('https://api-robot-minsa.onrender.com/api/buscar-dni', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ dni: currentIntern.dni })
-            });
-            const result = await response.json();
-            if (result.success && result.found) {
-                const { nombres, apePat, apeMat, universidad, carrera } = result.data;
-                setCurrentIntern(prev => ({ 
-                    ...prev, name: `${nombres} ${apePat} ${apeMat}`,
-                    university: universidad || prev.university, career: carrera || prev.career
-                }));
+            // Buscamos el documento con el ID igual al DNI en la colección 'internos_general'
+            const docRef = doc(db, "internos_general", dniBuscado);
+            const docSnap = await getDoc(docRef);
+
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                
+                // Construimos el nombre completo
+                const nombreCompleto = `${data.nombres} ${data.apellidoPaterno} ${data.apellidoMaterno}`;
+                
+                setCurrentIntern({
+                    dni: dniBuscado,
+                    name: nombreCompleto,
+                    university: data.universidad || "No especificada",
+                    career: data.carrera || "No especificada",
+                    sedeDocente: data.sedeDocente || "-",
+                    fechaInicio: data.fechaInicioInternado || "-",
+                    fechaFin: data.fechaFinInternado || "-"
+                });
             } else {
-                alert("⚠️ DNI no encontrado.");
+                alert("⚠️ DNI no encontrado en la Base de Datos cargada.");
                 setCurrentIntern(prev => ({ ...prev, name: "", university: "", career: "" }));
             }
         } catch (error) {
-            alert("Error con el Robot API.");
-            setCurrentIntern(prev => ({ ...prev, name: "", university: "", career: "" }));
+            console.error("Error buscando en Firebase:", error);
+            alert("Error de conexión con la base de datos.");
+            setCurrentIntern(prev => ({ ...prev, name: "" }));
         }
     };
 
     const addInternToList = () => {
-        if(!currentIntern.name || currentIntern.name === "⏳ Buscando...") return alert("DNI no válido");
+        if(!currentIntern.name || currentIntern.name.includes("Buscando")) return alert("Primero busque un DNI válido.");
+        
         setInternsList([...internsList, currentIntern]);
         setVisitData(prev => ({...prev, internCount: internsList.length + 1}));
-        setCurrentIntern({ dni: '', name: '', university: '', career: '' });
+        
+        // Limpiamos solo el DNI y nombre para el siguiente, dejamos vacío lo demás
+        setCurrentIntern({ dni: '', name: '', university: '', career: '', sedeDocente: '', fechaInicio: '', fechaFin: '' });
     };
 
     const startSupervision = async () => {
         if (!selectedCenter) return alert("⚠️ Seleccione un centro de salud.");
         
-        // Prioridad: GPS Real -> Coordenadas del Centro (Data.js)
         let finalCoords = location;
         if (!finalCoords) {
             console.warn("Usando ubicación del data.js por falta de GPS");
@@ -178,11 +206,9 @@ export default function Dashboard({ user, isAdmin }) {
         return `${h}h ${m}m ${s}s`;
     };
 
-    // Lógica para centrar el mapa: Si hay un centro seleccionado, usa SUS coordenadas. Si no, usa el GPS.
-    // Esto asegura que veas el mapa de la zona exacta del centro seleccionado.
     const mapCenter = selectedCenter 
         ? [selectedCenter.lat, selectedCenter.lng] 
-        : (location ? [location.lat, location.lng] : [-12.046374, -77.042793]); // Default Lima
+        : (location ? [location.lat, location.lng] : [-12.046374, -77.042793]);
 
     if (loading) return <div className="loading-screen"><Loader className="gps-loading"/> Cargando...</div>;
 
@@ -226,11 +252,8 @@ export default function Dashboard({ user, isAdmin }) {
                             {location ? <span className="gps-ok"><CheckCircle size={16}/> GPS Activo</span> : <span className="gps-loading" style={{color: '#f59e0b'}}>🛰️ Buscando señal...</span>}
                         </div>
                         
-                        {/* MAPA PREVIO AL INGRESO (Para confirmar ubicación) */}
                         <div className="map-preview-box" style={{height: '200px', marginBottom: '20px', borderRadius: '8px', overflow: 'hidden'}}>
-                             {/* Key ayuda a recargar el mapa si cambia el centro */}
                             <MapContainer key={selectedCenter ? selectedCenter.nombre : "default"} center={mapCenter} zoom={16} style={{ height: '100%', width: '100%' }}>
-                                {/* MAPA GOOGLE CALLES (Standard Roadmap) */}
                                 <TileLayer 
                                     url="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}" 
                                     attribution='© Google Maps' 
@@ -255,9 +278,7 @@ export default function Dashboard({ user, isAdmin }) {
                                     <Clock size={24}/> <span>{timeLeft === 0 ? "TIEMPO CUMPLIDO" : `Restante: ${formatTime(timeLeft)}`}</span>
                                 </div>
                                 <div className="map-container-box">
-                                    {/* MAPA DURANTE LA VISITA */}
                                     <MapContainer center={mapCenter} zoom={16} style={{ height: '100%', width: '100%' }}>
-                                        {/* MAPA GOOGLE CALLES (Standard Roadmap) */}
                                         <TileLayer 
                                             url="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}" 
                                             attribution='© Google Maps' 
@@ -277,28 +298,42 @@ export default function Dashboard({ user, isAdmin }) {
                                 </div>
                                 <div className="robot-box">
                                     <div className="search-row">
-                                        <input type="text" placeholder="DNI" maxLength="8" value={currentIntern.dni} onChange={e => setCurrentIntern({...currentIntern, dni: e.target.value.replace(/\D/g, '')})} />
+                                        <input 
+                                            type="text" 
+                                            placeholder="Ingrese DNI" 
+                                            maxLength="8" 
+                                            value={currentIntern.dni} 
+                                            onChange={e => setCurrentIntern({...currentIntern, dni: e.target.value.replace(/\D/g, '')})} 
+                                            onKeyDown={e => e.key === 'Enter' && searchDNI()}
+                                        />
                                         <button onClick={searchDNI} className="btn-icon"><Search size={18}/></button>
                                     </div>
-                                    <input type="text" value={currentIntern.name} readOnly className="readonly-input" placeholder="Nombre del interno"/>
-                                    <div className="dropdown-row">
-                                         <select value={currentIntern.university} onChange={e=>setCurrentIntern({...currentIntern, university:e.target.value})}>
-                                            <option value="">- Universidad -</option>
-                                            {universities.map(u => <option key={u} value={u}>{u}</option>)}
-                                         </select>
-                                         <select value={currentIntern.career} onChange={e=>setCurrentIntern({...currentIntern, career:e.target.value})}>
-                                            <option value="">- Carrera -</option>
-                                            {careers.map(c => <option key={c.id} value={c.label}>{c.label}</option>)}
-                                         </select>
+                                    
+                                    {/* Campos de solo lectura que se llenan desde Firebase */}
+                                    <div style={{display: 'flex', flexDirection: 'column', gap: '8px', marginBottom:'10px'}}>
+                                        <input type="text" value={currentIntern.name} readOnly className="readonly-input" placeholder="Nombre completo" style={{fontWeight:'bold'}}/>
+                                        <div style={{display:'flex', gap:'5px'}}>
+                                            <input type="text" value={currentIntern.university} readOnly className="readonly-input" placeholder="Universidad" style={{flex:1, fontSize:'0.85rem'}}/>
+                                            <input type="text" value={currentIntern.career} readOnly className="readonly-input" placeholder="Carrera" style={{flex:1, fontSize:'0.85rem'}}/>
+                                        </div>
+                                        <div style={{display:'flex', gap:'5px'}}>
+                                            <input type="text" value={currentIntern.fechaInicio} readOnly className="readonly-input" placeholder="Inicio" style={{flex:1, fontSize:'0.85rem', color:'#64748b'}}/>
+                                            <input type="text" value={currentIntern.fechaFin} readOnly className="readonly-input" placeholder="Fin" style={{flex:1, fontSize:'0.85rem', color:'#64748b'}}/>
+                                        </div>
                                     </div>
+
                                     <button onClick={addInternToList} className="btn-add-list">AGREGAR A LA LISTA</button>
                                 </div>
+                                
                                 <div className="list-box">
                                     <span>Registrados ({internsList.length})</span>
                                     <ul className="intern-list">
                                         {internsList.map((item, idx) => (
                                             <li key={idx}>
-                                                <div className="info"><strong>{item.name}</strong><span>{item.university}</span></div>
+                                                <div className="info">
+                                                    <strong>{item.name}</strong>
+                                                    <span style={{fontSize:'0.75rem', color:'#64748b'}}>{item.university} - {item.career}</span>
+                                                </div>
                                                 <button onClick={() => setInternsList(internsList.filter((_, i) => i !== idx))} className="btn-trash"><Trash2 size={16}/></button>
                                             </li>
                                         ))}
@@ -309,7 +344,6 @@ export default function Dashboard({ user, isAdmin }) {
                                     <textarea placeholder="Observaciones de la visita..." value={visitData.observations} onChange={e=>setVisitData({...visitData, observations: e.target.value})}></textarea>
                                 </div>
 
-                                {/* SECCIÓN DEL FORMULARIO DE SALIDA GOOGLE */}
                                 <div className="google-box" style={{ background: '#fff9eb', padding: '15px', borderRadius: '8px', border: '1px solid #ffeeba', marginTop: '10px' }}>
                                     <a href="https://docs.google.com/forms/d/e/1FAIpQLSf3XdABYsUwB1iTjopQM7vikCqvDcvNegPPE-6EaDmPM5ktAA/viewform?usp=dialog" 
                                        target="_blank" rel="noreferrer" 
