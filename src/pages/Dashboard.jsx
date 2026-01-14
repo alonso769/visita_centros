@@ -96,7 +96,7 @@ export default function Dashboard({ user, isAdmin }) {
         if (currentIntern.dni.length !== 8) return alert("DNI debe tener 8 dígitos");
         setCurrentIntern(prev => ({ ...prev, name: "⏳ Buscando..." }));
         try {
-            const response = await fetch('http://localhost:3001/api/buscar-dni', {
+            const response = await fetch('https://api-robot-minsa.onrender.com/api/buscar-dni', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ dni: currentIntern.dni })
